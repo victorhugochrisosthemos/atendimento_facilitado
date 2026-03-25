@@ -1,8 +1,6 @@
 import re
 from datetime import datetime
 from io import BytesIO
-import tkinter as tk
-from tkinter import filedialog
 
 import pandas as pd
 import requests
@@ -59,7 +57,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
 
 FIELDS = [
     {
@@ -156,6 +153,9 @@ def init_state():
     if "address_locked" not in st.session_state:
         st.session_state.address_locked = False
 
+    if "last_imported_file_id" not in st.session_state:
+        st.session_state.last_imported_file_id = None
+
 
 def normalize_cep(cep: str) -> str:
     return re.sub(r"\D", "", cep or "")
@@ -188,32 +188,6 @@ def is_generic_cep(cep: str) -> bool:
         "87654321",
     }
     return cep in invalids
-
-
-def choose_save_file(default_name: str, extension: str, filetypes):
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    selected = filedialog.asksaveasfilename(
-        title="Escolha onde salvar",
-        defaultextension=extension,
-        initialfile=default_name,
-        filetypes=filetypes,
-    )
-    root.destroy()
-    return selected
-
-
-def choose_open_file(filetypes):
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    selected = filedialog.askopenfilename(
-        title="Selecione o arquivo",
-        filetypes=filetypes,
-    )
-    root.destroy()
-    return selected
 
 
 def validate_cep_via_viacep(cep: str) -> dict:
@@ -281,32 +255,23 @@ def build_final_meta():
     }
 
 
-def save_excel_with_meta(file_path: str, form_data: dict, meta: dict):
-    df_form = pd.DataFrame([form_data])
-    df_meta = pd.DataFrame([meta])
-
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        df_form.to_excel(writer, index=False, sheet_name="dados")
-        df_meta.to_excel(writer, index=False, sheet_name="meta")
-
-
-def export_final_excel_bytes(form_data: dict, meta: dict) -> bytes:
+def export_excel_bytes(form_data: dict, meta: dict, data_sheet_name: str) -> bytes:
     output = BytesIO()
 
     df_form = pd.DataFrame([form_data])
     df_meta = pd.DataFrame([meta])
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_form.to_excel(writer, index=False, sheet_name="atendimento")
+        df_form.to_excel(writer, index=False, sheet_name=data_sheet_name)
         df_meta.to_excel(writer, index=False, sheet_name="meta")
 
     output.seek(0)
     return output.getvalue()
 
 
-def load_partial_excel(file_path: str):
-    df_data = pd.read_excel(file_path, sheet_name="dados")
-    df_meta = pd.read_excel(file_path, sheet_name="meta")
+def load_partial_excel(uploaded_file):
+    df_data = pd.read_excel(uploaded_file, sheet_name="dados")
+    df_meta = pd.read_excel(uploaded_file, sheet_name="meta")
 
     if df_data.empty:
         raise ValueError("A aba 'dados' está vazia.")
@@ -334,48 +299,6 @@ def load_partial_excel(file_path: str):
             meta["stopped_at_step"] = 0
 
     return form_data, meta
-
-
-def save_partial_excel_file():
-    meta = build_partial_meta()
-    default_name = f"atendimento_parcial_{st.session_state.session_id}.xlsx"
-
-    selected_path = choose_save_file(
-        default_name=default_name,
-        extension=".xlsx",
-        filetypes=[("Arquivo Excel", "*.xlsx")],
-    )
-
-    if not selected_path:
-        return None
-
-    save_excel_with_meta(
-        file_path=selected_path,
-        form_data=st.session_state.form_data,
-        meta=meta,
-    )
-    return selected_path
-
-
-def save_final_excel_file():
-    meta = build_final_meta()
-    default_name = f"atendimento_final_{st.session_state.session_id}.xlsx"
-
-    selected_path = choose_save_file(
-        default_name=default_name,
-        extension=".xlsx",
-        filetypes=[("Arquivo Excel", "*.xlsx")],
-    )
-
-    if not selected_path:
-        return None
-
-    save_excel_with_meta(
-        file_path=selected_path,
-        form_data=st.session_state.form_data,
-        meta=meta,
-    )
-    return selected_path
 
 
 def render_progress():
@@ -475,12 +398,20 @@ def render_step():
             st.rerun()
 
     with c3:
-        if st.button("Salvar e parar", use_container_width=True):
-            file_path = save_partial_excel_file()
-            if file_path:
-                st.success(f"Progresso salvo em: {file_path}")
-            else:
-                st.info("Salvamento cancelado.")
+        partial_meta = build_partial_meta()
+        partial_bytes = export_excel_bytes(
+            st.session_state.form_data,
+            partial_meta,
+            data_sheet_name="dados",
+        )
+
+        st.download_button(
+            "Salvar e parar",
+            data=partial_bytes,
+            file_name=f"atendimento_parcial_{st.session_state.session_id}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 
 def render_review_and_export():
@@ -493,35 +424,29 @@ def render_review_and_export():
 
     st.markdown("### Exportação")
 
+    final_meta = build_final_meta()
+    final_bytes = export_excel_bytes(
+        review_data,
+        final_meta,
+        data_sheet_name="atendimento",
+    )
+
+    st.download_button(
+        "Baixar Excel final",
+        data=final_bytes,
+        file_name=f"atendimento_final_{st.session_state.session_id}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
     c1, c2 = st.columns(2)
 
     with c1:
-        if st.button("Salvar Excel final em uma pasta", type="primary", use_container_width=True):
-            saved_path = save_final_excel_file()
-            if saved_path:
-                st.success(f"Excel salvo em: {saved_path}")
-            else:
-                st.info("Salvamento cancelado.")
-
-    with c2:
-        meta = build_final_meta()
-        excel_bytes = export_final_excel_bytes(review_data, meta)
-        st.download_button(
-            "Baixar Excel final",
-            data=excel_bytes,
-            file_name=f"atendimento_final_{st.session_state.session_id}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
-    c3, c4 = st.columns(2)
-
-    with c3:
         if st.button("Editar informações", use_container_width=True):
             st.session_state.step = 0
             st.rerun()
 
-    with c4:
+    with c2:
         if st.button("Novo atendimento", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
@@ -532,42 +457,51 @@ def render_resume_area():
     st.markdown('<div class="bottom-box">', unsafe_allow_html=True)
     st.markdown("### Retomar atendimento")
 
-    if st.button("Importar Excel salvo", use_container_width=True):
-        selected_file = choose_open_file([("Arquivo Excel", "*.xlsx")])
+    uploaded_file = st.file_uploader(
+        "Importe o Excel salvo para continuar de onde parou",
+        type=["xlsx"],
+        label_visibility="collapsed",
+        key="resume_uploader",
+    )
 
-        if not selected_file:
-            st.info("Importação cancelada.")
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
+    if uploaded_file is not None:
+        current_file_id = (
+            f"{uploaded_file.name}-"
+            f"{uploaded_file.size}-"
+            f"{getattr(uploaded_file, 'file_id', 'noid')}"
+        )
 
-        try:
-            form_data, meta = load_partial_excel(selected_file)
+        if st.session_state.last_imported_file_id != current_file_id:
+            try:
+                form_data, meta = load_partial_excel(uploaded_file)
 
-            for field in FIELDS:
-                if field["key"] not in form_data:
-                    form_data[field["key"]] = ""
+                for field in FIELDS:
+                    if field["key"] not in form_data:
+                        form_data[field["key"]] = ""
 
-            st.session_state.form_data = form_data
-            st.session_state.step = meta.get("stopped_at_step", 0)
-            st.session_state.session_id = str(
-                meta.get("session_id", datetime.now().strftime("%Y%m%d%H%M%S"))
-            )
+                st.session_state.form_data = form_data
+                st.session_state.step = meta.get("stopped_at_step", 0)
+                st.session_state.session_id = str(
+                    meta.get("session_id", datetime.now().strftime("%Y%m%d%H%M%S"))
+                )
 
-            cep = st.session_state.form_data.get("cep", "")
-            rua = st.session_state.form_data.get("rua", "")
-            bairro = st.session_state.form_data.get("bairro", "")
-            cidade = st.session_state.form_data.get("cidade", "")
-            estado = st.session_state.form_data.get("estado", "")
+                cep = st.session_state.form_data.get("cep", "")
+                rua = st.session_state.form_data.get("rua", "")
+                bairro = st.session_state.form_data.get("bairro", "")
+                cidade = st.session_state.form_data.get("cidade", "")
+                estado = st.session_state.form_data.get("estado", "")
 
-            st.session_state.address_locked = bool(
-                normalize_cep(cep) and (rua or bairro or cidade or estado)
-            )
+                st.session_state.address_locked = bool(
+                    normalize_cep(cep) and (rua or bairro or cidade or estado)
+                )
 
-            st.success(f"Atendimento restaurado na etapa {st.session_state.step + 1}.")
-            st.rerun()
+                st.session_state.last_imported_file_id = current_file_id
 
-        except Exception as e:
-            st.error(f"Não foi possível importar o arquivo: {e}")
+                st.success(f"Atendimento restaurado na etapa {st.session_state.step + 1}.")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Não foi possível importar o arquivo: {e}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
